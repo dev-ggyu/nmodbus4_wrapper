@@ -1,0 +1,190 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Tasks;
+using Modbus.Device;
+
+namespace utils.modbus
+{
+
+    static class ModbusWrapper
+    {
+        //private static readonly object modbuslock = new object();
+
+        public const int _PWM_INDEX1 = 4;
+        public const int _PWM_INDEX2 = 5;
+
+        private static string _IP = "192.168.0.203";    // modbus slave IP address
+        private static int _PORT = 502;              // modbus TCP port is 502
+        private static bool[] bDataTemp;
+        private static ushort[] uDataTemp;
+
+        private static TcpClient client;
+        private static ModbusIpMaster master;
+        private static LingerOption lingerOpts = new LingerOption(true, 0);
+
+        //private DateTime lastAccessTime;
+        private static int retryCnt = 0;
+        private static int retrySend = 0;
+        public static bool Init()
+        {
+            bool retVal = false;
+            try
+            {
+                client = null;
+                master = null;
+                client = new TcpClient();
+
+                client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.NoDelay, true); //Not Support Raspberry
+                //client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true); // tcpport 와 비정상 연결종료(케이블 단절) 등으로 끊길경우 이후 접속건에 대한 정상 처리를 안해줌....
+                client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendTimeout, 30);
+                client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveTimeout, 30);
+                client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Linger, lingerOpts);
+                client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress,true);
+
+                //client.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.);
+                Connect(client.Client, _IP, _PORT);
+                master = ModbusIpMaster.CreateIp(client);
+                retVal = true;
+            }
+            catch (Exception ex)
+            {
+                if (3 < retryCnt)
+                {
+                    //Environment.Exit(ErrorCode.ERROR_MODBUS_SESSION);
+                }
+            }
+            return retVal;
+        }
+
+
+        private static void Connect(Socket socket, String ip, int port)
+        {
+            var result = socket.BeginConnect(ip, port, null, null);
+            bool success = result.AsyncWaitHandle.WaitOne(30, true);
+            if (!success)
+            {
+                retryCnt++;
+                socket.Close();
+                throw new SocketException(10060); // Connection timed out. 
+            }
+            else retryCnt = 0;
+
+        }
+
+        private static bool isAccessible()
+        {
+            return client != null && client.Client.Connected;
+        }
+
+        private static bool ProcessModbus(Action command)
+        {
+            bool isSuccess = false;
+            retrySend = 0;
+            while (!isSuccess && retrySend < 3)
+            {
+                try
+                {
+                    if (!isAccessible())
+                    {
+                        if (!Init())
+                        {
+                            return isSuccess;
+                        }
+                    }
+
+                    command();
+                    isSuccess = true;
+                    //Thread.Sleep(50);
+                }
+                catch (Exception ex)
+                {
+                    client?.Close();
+                    client = null;
+                }
+                finally
+                {
+                    retrySend++;
+                }
+            }
+            return isSuccess;
+        }
+
+        public static bool ReadCoilStatus(int iStart, int iTotal, out bool[] bData)
+        {
+            lock (typeof(ModbusWrapper))
+            {
+                bool isSuccess = false;
+                isSuccess = ProcessModbus(delegate { bDataTemp = master.ReadCoils(Convert.ToUInt16(iStart), Convert.ToUInt16(iTotal)); });
+                bData = bDataTemp;
+                bDataTemp = null;
+                return isSuccess;
+            }
+        }
+
+        public static bool ForceSingleCoil(int iStart, int iOnOff)
+        {
+            return ForceSingleCoil(iStart, 0 < iOnOff);
+        }
+
+        public static bool ForceSingleCoil(int iStart, bool iOnOff)
+        {
+            lock (typeof(ModbusWrapper))
+            {
+                bool isSuccess = false;
+                isSuccess = ProcessModbus(delegate { master.WriteSingleCoil(Convert.ToUInt16(iStart), iOnOff); });
+                return isSuccess;
+            }
+        }
+
+        public static bool ForceMultiCoils(int iStart, bool[] iOnOffs)
+        {
+            lock (typeof(ModbusWrapper))
+            {
+                bool isSuccess = false;
+                isSuccess = ProcessModbus(delegate { master.WriteMultipleCoils(Convert.ToUInt16(iStart), iOnOffs); });
+                return isSuccess;
+            }
+        }
+
+        public static bool WriteReg(int iStart, ushort i_byData)
+        {
+            lock (typeof(ModbusWrapper))
+            {
+                bool isSuccess = false;
+                isSuccess = ProcessModbus(delegate { master.WriteSingleRegister(Convert.ToUInt16(iStart), i_byData); });
+                return isSuccess;
+            }
+        }
+
+        public static bool WriteRegs(int iStart, ushort[] i_byData)
+        {
+            lock (typeof(ModbusWrapper))
+            {
+                bool isSuccess = false;
+                isSuccess = ProcessModbus(delegate { master.WriteMultipleRegisters(Convert.ToUInt16(iStart), i_byData); });
+                return isSuccess;
+            }
+        }
+
+        public static bool ReadRegs(int iStart, int iTotal, out ushort[] uData)
+        {
+            lock (typeof(ModbusWrapper))
+            {
+                bool isSuccess = false;
+                isSuccess = ProcessModbus(delegate
+                {
+                    uDataTemp = master.ReadHoldingRegisters(Convert.ToUInt16(iStart), Convert.ToUInt16(iTotal));
+                });
+                uData = uDataTemp;
+                uDataTemp = null;
+
+                return isSuccess;
+            }
+        }
+
+    }
+
+}
